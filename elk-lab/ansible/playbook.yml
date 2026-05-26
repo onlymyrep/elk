@@ -1,0 +1,216 @@
+---
+- name: Base configuration for all nodes
+  hosts: all
+  become: yes
+  vars:
+    docker_version: "5:24.0.7-1~ubuntu.22.04~jammy"
+    elk_version: "8.11.0"
+    elasticsearch_password: "changeme"   # в production сменить!
+    kibana_password: "changeme"
+    logstash_password: "changeme"
+    network_hosts:
+      master1: "192.168.56.21"
+      master2: "192.168.56.22"
+      data1: "192.168.56.31"
+      data2: "192.168.56.32"
+      data3: "192.168.56.33"
+      data4: "192.168.56.34"
+      logstash1: "192.168.56.11"
+      logstash2: "192.168.56.12"
+      kibana: "192.168.56.40"
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - net-tools
+          - software-properties-common
+          - python3-pip
+        state: present
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker
+      apt:
+        name: "docker-ce={{ docker_version }}"
+        state: present
+        update_cache: yes
+
+    - name: Install Docker Python module
+      pip:
+        name: docker
+        state: present
+
+    - name: Ensure Docker is started and enabled
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create directories for configs and data
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: 0755
+      loop:
+        - /opt/elasticsearch/config
+        - /opt/elasticsearch/data
+        - /opt/logstash/config
+        - /opt/logstash/pipeline
+        - /opt/kibana/config
+
+    - name: Copy /etc/hosts with all nodes
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ network_hosts[item] }} {{ item }}"
+        state: present
+      loop: "{{ network_hosts.keys() }}"
+
+    # Для отладки – перезагрузка network (необязательно)
+    - name: Flush network (restart networking)
+      service:
+        name: systemd-networkd
+        state: restarted
+      when: ansible_distribution == "Ubuntu"
+
+- name: Elasticsearch nodes configuration
+  hosts: elasticsearch
+  become: yes
+  vars:
+    es_heap_size: "50%"   # будет заменено на конкретное значение в зависимости от роли
+  tasks:
+    - name: Set heap size for master nodes
+      set_fact:
+        es_heap_size: "2g"
+      when: "'master' in role"
+
+    - name: Set heap size for data nodes
+      set_fact:
+        es_heap_size: "4g"
+      when: "'data' in role"
+
+    - name: Create elasticsearch.yml from template
+      template:
+        src: templates/elasticsearch.yml.j2
+        dest: /opt/elasticsearch/config/elasticsearch.yml
+        mode: 0644
+      vars:
+        node_name: "{{ ansible_hostname }}"
+        node_roles: "{{ 'master' if 'master' in role else 'data' }}"
+
+    - name: Run Elasticsearch container
+      docker_container:
+        name: "es-{{ ansible_hostname }}"
+        image: "docker.elastic.co/elasticsearch/elasticsearch:{{ elk_version }}"
+        state: started
+        restart_policy: unless-stopped
+        network_mode: host
+        memory: "{{ (ansible_memtotal_mb * 0.9) | int }}m"
+        env:
+          node.name: "{{ ansible_hostname }}"
+          node.roles: "{{ 'master' if 'master' in role else 'data' }}"
+          ES_JAVA_OPTS: "-Xms{{ es_heap_size }} -Xmx{{ es_heap_size }}"
+          ELASTIC_PASSWORD: "{{ elasticsearch_password }}"
+          xpack.security.enabled: "true"
+          discovery.seed_hosts: "master1:9300,master2:9300"
+          cluster.initial_master_nodes: "master1,master2"
+        volumes:
+          - /opt/elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+          - /opt/elasticsearch/data:/usr/share/elasticsearch/data
+
+- name: Logstash nodes configuration
+  hosts: logstash
+  become: yes
+  tasks:
+    - name: Create logstash.yml from template
+      template:
+        src: templates/logstash.yml.j2
+        dest: /opt/logstash/config/logstash.yml
+        mode: 0644
+
+    - name: Create pipeline config from template
+      template:
+        src: templates/logstash-pipeline.conf.j2
+        dest: /opt/logstash/pipeline/main.conf
+        mode: 0644
+
+    - name: Run Logstash container
+      docker_container:
+        name: logstash
+        image: "docker.elastic.co/logstash/logstash:{{ elk_version }}"
+        state: started
+        restart_policy: unless-stopped
+        network_mode: host
+        memory: "{{ (ansible_memtotal_mb * 0.8) | int }}m"
+        volumes:
+          - /opt/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+          - /opt/logstash/pipeline:/usr/share/logstash/pipeline:ro
+
+- name: Kibana configuration
+  hosts: kibana_host
+  become: yes
+  tasks:
+    - name: Create kibana.yml from template
+      template:
+        src: templates/kibana.yml.j2
+        dest: /opt/kibana/config/kibana.yml
+        mode: 0644
+
+    - name: Run Kibana container
+      docker_container:
+        name: kibana
+        image: "docker.elastic.co/kibana/kibana:{{ elk_version }}"
+        state: started
+        restart_policy: unless-stopped
+        network_mode: host
+        memory: "{{ (ansible_memtotal_mb * 0.8) | int }}m"
+        environment:
+          ELASTICSEARCH_HOSTS: "http://master1:9200,http://master2:9200"
+          ELASTICSEARCH_USERNAME: "kibana_system"
+          ELASTICSEARCH_PASSWORD: "{{ kibana_password }}"
+        volumes:
+          - /opt/kibana/config/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+
+- name: Filebeat (log source) configuration
+  hosts: filebeat_host
+  become: yes
+  tasks:
+    - name: Download and install Filebeat .deb
+      apt:
+        deb: "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-{{ elk_version }}-amd64.deb"
+        state: present
+
+    - name: Create filebeat.yml from template
+      template:
+        src: templates/filebeat.yml.j2
+        dest: /etc/filebeat/filebeat.yml
+        mode: 0644
+      notify: restart filebeat
+
+    - name: Enable and start filebeat
+      systemd:
+        name: filebeat
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: restart filebeat
+      systemd:
+        name: filebeat
+        state: restarted

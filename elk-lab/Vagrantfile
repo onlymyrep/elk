@@ -1,0 +1,62 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+ENV['VAGRANT_SERVER_URL'] = 'https://vagrant.elab.pro'
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/jammy64"
+  config.vm.box_version = "20241001.0.0"
+
+  # Общие настройки для всех ВМ
+  config.vm.provider "virtualbox" do |vb|
+    vb.cpus = 2
+    vb.memory = 4096   # будет переопределено для каждой роли
+    vb.linked_clone = true
+  end
+
+  # Сеть: все ВМ получают IP из диапазона 192.168.56.x
+  # Имена хостов прописаны статически
+  nodes = {
+    "filebeat"   => { ip: "192.168.56.10", mem: 1024, cpu: 1, role: "filebeat" },
+    "logstash1"  => { ip: "192.168.56.11", mem: 4096, cpu: 2, role: "logstash" },
+    "logstash2"  => { ip: "192.168.56.12", mem: 4096, cpu: 2, role: "logstash" },
+    "master1"    => { ip: "192.168.56.21", mem: 4096, cpu: 2, role: "elasticsearch_master" },
+    "master2"    => { ip: "192.168.56.22", mem: 4096, cpu: 2, role: "elasticsearch_master" },
+    "data1"      => { ip: "192.168.56.31", mem: 8192, cpu: 2, role: "elasticsearch_data" },
+    "data2"      => { ip: "192.168.56.32", mem: 8192, cpu: 2, role: "elasticsearch_data" },
+    "data3"      => { ip: "192.168.56.33", mem: 8192, cpu: 2, role: "elasticsearch_data" },
+    "data4"      => { ip: "192.168.56.34", mem: 8192, cpu: 2, role: "elasticsearch_data" },
+    "kibana"     => { ip: "192.168.56.40", mem: 4096, cpu: 1, role: "kibana" }
+  }
+
+  nodes.each do |name, cfg|
+    config.vm.define name do |node|
+      node.vm.hostname = name
+      node.vm.network "private_network", ip: cfg[:ip]
+
+      node.vm.provider "virtualbox" do |vb|
+        vb.memory = cfg[:mem]
+        vb.cpus = cfg[:cpu]
+        vb.name = "elk-#{name}"
+      end
+
+      # Общий Ansible provisioner для всех ВМ, но с ограничением по текущей группе
+      node.vm.provision "ansible" do |ansible|
+        ansible.compatibility_mode = "2.0"
+        ansible.playbook = "ansible/playbook.yml"
+        ansible.limit = name               # выполняем playbook только для текущей ВМ
+        ansible.groups = {
+          "elasticsearch" => ["master1", "master2", "data1", "data2", "data3", "data4"],
+          "logstash"      => ["logstash1", "logstash2"],
+          "filebeat_host" => ["filebeat"],
+          "kibana_host"   => ["kibana"],
+          "all"           => nodes.keys
+        }
+        ansible.extra_vars = {
+          role: cfg[:role],
+          node_ip: cfg[:ip],
+          node_name: name
+        }
+      end
+    end
+  end
+end

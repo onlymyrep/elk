@@ -1,0 +1,13 @@
+filebeat.inputs:
+- type: log
+  enabled: true
+  paths:
+    - /var/log/syslog
+    - /var/log/auth.log
+  fields_under_root: true
+
+output.logstash:
+  hosts: ["logstash1:5044", "logstash2:5044"]
+  loadbalance: true
+
+logging.level: info

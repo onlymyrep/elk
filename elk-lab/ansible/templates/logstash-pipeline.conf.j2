@@ -1,0 +1,25 @@
+input {
+  beats {
+    port => 5044
+    host => "0.0.0.0"
+  }
+}
+
+filter {
+  # Пример grok для syslog
+  grok {
+    match => { "message" => "%{SYSLOGTIMESTAMP:timestamp} %{SYSLOGHOST:hostname} %{DATA:program}(?:\[%{POSINT:pid}\])?: %{GREEDYDATA:msg}" }
+  }
+  date {
+    match => [ "timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://master1:9200", "http://master2:9200"]
+    user => "logstash_internal"
+    password => "{{ logstash_password }}"
+    index => "logs-%{+YYYY.MM.dd}"
+  }
+}

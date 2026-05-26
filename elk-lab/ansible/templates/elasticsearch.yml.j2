@@ -1,0 +1,10 @@
+cluster.name: "ttk-log-cluster"
+network.host: 0.0.0.0
+discovery.seed_hosts:
+  - master1:9300
+  - master2:9300
+cluster.initial_master_nodes:
+  - master1
+  - master2
+xpack.security.enabled: true
+xpack.security.transport.ssl.enabled: false
